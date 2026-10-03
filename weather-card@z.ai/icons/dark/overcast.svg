@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
   <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <circle cx="50.94" cy="38.86" r="6.82" fill="#8A94A7" opacity="0.9"/>
-    <circle cx="60.86" cy="35.76" r="9.30" fill="#8A94A7" opacity="0.9"/>
-    <circle cx="67.68" cy="40.10" r="5.58" fill="#8A94A7" opacity="0.9"/>
-    <rect x="45.98" y="38.24" width="26.04" height="7.44" rx="3.72" fill="#8A94A7" opacity="0.9"/>
-    <circle cx="33.00" cy="54.00" r="11.00" fill="#E7EBF3"/>
-    <circle cx="49.00" cy="49.00" r="15.00" fill="#E7EBF3"/>
-    <circle cx="60.00" cy="56.00" r="9.00" fill="#E7EBF3"/>
-    <rect x="25.00" y="53.00" width="42.00" height="12.00" rx="6.00" fill="#E7EBF3"/>
+    <circle cx="50.94" cy="38.86" r="6.82" fill="#7F8AA0" opacity="0.9"/>
+    <circle cx="60.86" cy="35.76" r="9.30" fill="#7F8AA0" opacity="0.9"/>
+    <circle cx="67.68" cy="40.10" r="5.58" fill="#7F8AA0" opacity="0.9"/>
+    <rect x="45.98" y="38.24" width="26.04" height="7.44" rx="3.72" fill="#7F8AA0" opacity="0.9"/>
+    <circle cx="33.00" cy="54.00" r="11.00" fill="#E8ECF4"/>
+    <circle cx="49.00" cy="49.00" r="15.00" fill="#E8ECF4"/>
+    <circle cx="60.00" cy="56.00" r="9.00" fill="#E8ECF4"/>
+    <rect x="25.00" y="53.00" width="42.00" height="12.00" rx="6.00" fill="#E8ECF4"/>
   </g>
 </svg>

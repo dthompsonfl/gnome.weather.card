@@ -1,19 +1,26 @@
 /* widget.js — Weather Card presentation.
  *
  * Builds and renders the desktop card. This module owns:
- *   - the card actor and its layout (St/Clutter only, no webviews)
- *   - rendering of every designed state (weather, onboarding, loading,
- *     errors, locating, choosing) so the card is never blank
- *   - restrained micro-animation, honoring reduced motion
- *   - drag-to-reposition with a stage grab, click-to-open menu,
- *     keyboard access for all interactive elements
+ *   - the card actor and its layered material (St/Clutter only, no webviews)
+ *   - every designed state: weather, onboarding, locating, loading, errors
+ *     and offline, so the card is never blank
+ *   - the hero weather scene and its ambient motion (see scene.js)
+ *   - drag-to-reposition with a stage grab, click or keyboard to open the menu
+ *   - accessibility semantics, so assistive technology hears one concise
+ *     sentence instead of a stream of decorative actors
  *
- * The controller (extension.js) decides *which* state to show; this
- * module decides how it looks.
+ * The controller (extension.js) decides *which* state to show; this module
+ * decides how it looks. Provider specifics live in provider.js, location in
+ * geoclue.js, persistence in store.js, parsing/validation in weather.js.
+ *
+ * GNOME 50 note: St.BoxLayout has no `spacing` property — constructing one
+ * throws "No property spacing on StBoxLayout" — so spacing is expressed the
+ * way the shell itself does it, through a Clutter.BoxLayout layout manager.
  *
  * SPDX-License-Identifier: MIT
  */
 
+import Atk from 'gi://Atk';
 import Clutter from 'gi://Clutter';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
@@ -21,26 +28,37 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import * as icons from './icons.js';
+import {buildMaterial, MaterialTheme, setMaterialPressed} from './material.js';
+import {WeatherSceneView} from './scene.js';
+import * as tokens from './tokens.js';
 import * as weather from './weather.js';
 
-const CARD_WIDTH = 340;
-const HERO_ICON_SIZE = 58;
-const HOURLY_ICON_SIZE = 26;
-const HOURLY_COUNT = 7;
 const V = Clutter.Orientation.VERTICAL;
 const H = Clutter.Orientation.HORIZONTAL;
 const EASE = Clutter.AnimationMode.EASE_OUT_QUAD;
-const EASE_INOUT = Clutter.AnimationMode.EASE_IN_OUT_QUAD;
+
+const {LAYOUT, MOTION, SPACE} = tokens;
 
 /* ------------------------------------------------------------ helpers */
 
-/* Vertical box with a little breathing room built in. */
-function vbox(spacing = 0) {
-    return new St.BoxLayout({orientation: V, spacing});
+/**
+ * A vertical or horizontal box.
+ *
+ * Spacing goes through a Clutter.BoxLayout because St.BoxLayout itself has
+ * no `spacing` property on the Shell versions we target.
+ */
+function box(orientation, spacing = 0, extra = {}) {
+    const b = new St.BoxLayout({orientation, ...extra});
+    b.set_layout_manager(new Clutter.BoxLayout({spacing}));
+    return b;
 }
 
-function hbox(spacing = 0) {
-    return new St.BoxLayout({orientation: H, spacing});
+function vbox(spacing = 0, extra) {
+    return box(V, spacing, extra);
+}
+
+function hbox(spacing = 0, extra) {
+    return box(H, spacing, extra);
 }
 
 function label(text, styleClass, {ellipsize = false, wrap = false} = {}) {
@@ -55,21 +73,45 @@ function label(text, styleClass, {ellipsize = false, wrap = false} = {}) {
     return l;
 }
 
-function button(text, styleClass, onActivate) {
+function button(text, styleClass, onActivate, {accessibleName = null} = {}) {
     const b = new St.Button({
         label: text,
         style_class: styleClass,
         can_focus: true,
         reactive: true,
     });
+    if (accessibleName)
+        b.accessible_name = accessibleName;
     b.connect('clicked', onActivate);
     return b;
 }
 
-function separator() {
-    const s = new St.Widget({style_class: 'wc-sep', height: 1});
-    s.x_expand = true;
-    return s;
+function hairline() {
+    return new St.Widget({style_class: 'wc-hairline'});
+}
+
+/**
+ * A status line, shown only when there is something worth saying.
+ *
+ * Freshness is deliberately quiet: when data is healthy and recent the card
+ * says nothing, because a permanent "Updated 9:42 PM" would compete with the
+ * temperature for the eye.
+ */
+function statusLine(text, {critical = false} = {}) {
+    if (!text)
+        return null;
+    const row = hbox(SPACE.md);
+    const dot = new St.Widget({
+        style_class: critical ? 'wc-status-dot wc-status-dot-critical' : 'wc-status-dot',
+        width: 6,
+        height: 6,
+    });
+    dot.y_align = Clutter.ActorAlign.CENTER;
+    row.add_child(dot);
+    const l = label(text, 'wc-status');
+    l.y_align = Clutter.ActorAlign.CENTER;
+    row.add_child(l);
+    return row;
 }
 
 /* ---------------------------------------------------------------- card */
@@ -79,43 +121,72 @@ export class WeatherCard {
      * @param {object} options
      * @param {Gio.Settings} options.settings
      * @param {string} options.basePath - extension directory
+     * @param {MaterialTheme} options.material - shared stylesheet owner
      * @param {object} options.callbacks - {refresh, useCurrentLocation,
      *        chooseLocation, unitToggle, resetPosition, positionSaved}
      */
-    constructor({settings, basePath, callbacks}) {
+    constructor({settings, basePath, material, callbacks}) {
         this._settings = settings;
         this._basePath = basePath;
         this._callbacks = callbacks;
-        this._scheme = icons.currentScheme();
-        this._paintScale = 1;
+        this._material = material;
         this._unit = weather.resolveUnit(settings.get_string('unit'));
         this._content = null;
-        this._pulse = null;
+        this._scene = null;
         this._menu = null;
         this._destroyed = false;
         this._overviewHidden = false;
+        this._press = null;
+        this._paintScale = 1;
+        this._render = null;
+        this._snapshot = null;
 
         this.actor = new St.Bin({
             style_class: 'wc-card',
-            width: CARD_WIDTH,
+            width: LAYOUT.cardWidth,
             reactive: true,
             can_focus: true,
+            track_hover: true,
         });
 
-        this._connectCardInput();
+        // The material lives behind the content so press/hover feedback can
+        // animate without touching the content's layout.
+        this._materialActor = buildMaterial({
+            highContrast: MaterialTheme.isHighContrast(),
+        });
+        this.actor.set_child(this._materialActor);
+
+        this._contentBin = new St.Bin({x_expand: true, y_expand: true});
+        this._materialActor.add_child(this._contentBin);
+
+        this._connectInput();
     }
 
     /* ------------------------------------------------------------ input */
 
-    _connectCardInput() {
-        this._pressId = this.actor.connect('button-press-event',
-            (actor, event) => this._onPress(event));
-        this._releaseId = this.actor.connect('button-release-event',
-            (actor, event) => this._onRelease(event));
-        this._motionId = this.actor.connect('motion-event',
-            (actor, event) => this._onMotion(event));
-        this._keyId = this.actor.connect('key-press-event',
-            (actor, event) => this._onKey(event));
+    _connectInput() {
+        this._ids = [
+            this.actor.connect('button-press-event',
+                (a, e) => this._onPress(e)),
+            this.actor.connect('button-release-event',
+                (a, e) => this._onRelease(e)),
+            this.actor.connect('motion-event',
+                (a, e) => this._onMotion(e)),
+            this.actor.connect('key-press-event',
+                (a, e) => this._onKey(e)),
+            this.actor.connect('notify::hover',
+                () => this._setHovered(this.actor.hover)),
+        ];
+    }
+
+    _setHovered(hovered) {
+        const layer = this._materialActor.materialLayers?.depth;
+        if (!layer)
+            return;
+        if (hovered)
+            layer.add_style_class_name('wc-mat-depth-hover');
+        else
+            layer.remove_style_class_name('wc-mat-depth-hover');
     }
 
     _sourceIsInteractive(event) {
@@ -137,6 +208,7 @@ export class WeatherCard {
             return Clutter.EVENT_PROPAGATE;
 
         this.actor.grab_key_focus();
+        setMaterialPressed(this._materialActor, true);
 
         const [sx, sy] = event.get_coords();
         const [ax, ay] = this.actor.get_position();
@@ -154,11 +226,10 @@ export class WeatherCard {
         if (!press)
             return Clutter.EVENT_PROPAGATE;
 
-        // Guard against stale press state (e.g. pointer re-entered the
-        // card after a release we never saw).
         const state = event.get_state();
         if (!(state & Clutter.ModifierType.BUTTON1_MASK)) {
             this._press = null;
+            setMaterialPressed(this._materialActor, false);
             return Clutter.EVENT_PROPAGATE;
         }
 
@@ -171,7 +242,7 @@ export class WeatherCard {
             try {
                 threshold = St.Settings.get().drag_threshold ?? 8;
             } catch (e) {
-                // Default threshold is fine.
+                // The default threshold is fine.
             }
             if (Math.hypot(dx, dy) < threshold)
                 return Clutter.EVENT_PROPAGATE;
@@ -184,8 +255,9 @@ export class WeatherCard {
             this._menu?.close();
         }
 
-        let [nx, ny] = [press.ax + dx, press.ay + dy];
-        [nx, ny] = this._clampToMonitor(nx, ny);
+        let nx = press.ax + dx;
+        let ny = press.ay + dy;
+        [nx, ny] = this.clampToVisible(nx, ny);
         this.actor.set_position(Math.round(nx), Math.round(ny));
         return Clutter.EVENT_STOP;
     }
@@ -195,9 +267,15 @@ export class WeatherCard {
         if (!press)
             return Clutter.EVENT_PROPAGATE;
         this._press = null;
+        setMaterialPressed(this._materialActor, false);
 
-        if (press.grab)
-            press.grab.dismiss();
+        if (press.grab) {
+            try {
+                press.grab.dismiss();
+            } catch (e) {
+                // Grab already dismissed.
+            }
+        }
 
         if (press.moved) {
             const [x, y] = this.actor.get_position();
@@ -215,20 +293,77 @@ export class WeatherCard {
             this._openMenu();
             return Clutter.EVENT_STOP;
         }
+        if (key === Clutter.KEY_Escape && this._menu?.isOpen) {
+            this._menu.close();
+            return Clutter.EVENT_STOP;
+        }
         return Clutter.EVENT_PROPAGATE;
     }
 
-    _clampToMonitor(x, y) {
+    /**
+     * Keep the card fully on screen.
+     *
+     * Uses whichever monitor currently holds the card, so a card dragged to a
+     * second display stays clamped to *that* display rather than to the
+     * primary one. On a monitor too small to hold the card, the top-left is
+     * preferred rather than producing an inverted range.
+     *
+     * @returns {[number, number]} clamped stage coordinates
+     */
+    clampToVisible(x, y) {
+        let geom;
         try {
-            const idx = global.display.get_primary_monitor();
-            const mon = global.display.get_monitor_geometry(idx);
-            const cardH = this.actor.height || 380;
-            x = Math.min(Math.max(mon.x + 8, x), mon.x + mon.width - CARD_WIDTH - 8);
-            y = Math.min(Math.max(mon.y + 8, y), mon.y + mon.height - Math.min(cardH, 300) - 8);
+            geom = global.display.get_monitor_geometry(this.monitorIndexFor(x, y));
         } catch (e) {
-            // Best effort only.
+            return [x, y];
         }
-        return [x, y];
+
+        const w = this.actor.width || LAYOUT.cardWidth;
+        const h = this.actor.height || LAYOUT.fallbackHeight;
+        const m = SPACE.md;
+
+        const minX = geom.x + m;
+        const minY = geom.y + m;
+        const maxX = geom.x + geom.width - w - m;
+        const maxY = geom.y + geom.height - h - m;
+
+        const cx = maxX < minX ? minX : Math.min(Math.max(x, minX), maxX);
+        const cy = maxY < minY ? minY : Math.min(Math.max(y, minY), maxY);
+        return [cx, cy];
+    }
+
+    /**
+     * Index of the monitor holding a card at the given stage position.
+     *
+     * @returns {number} monitor index, or the primary index as a fallback
+     */
+    monitorIndexFor(x, y) {
+        let primary = 0;
+        try {
+            primary = global.display.get_primary_monitor();
+            const n = global.display.get_n_monitors();
+            const w = this.actor.width || LAYOUT.cardWidth;
+            const h = this.actor.height || LAYOUT.fallbackHeight;
+            // Probe the card's own rectangle rather than a single point: a
+            // card spanning a monitor edge should resolve to whichever
+            // monitor holds its centre.
+            const cx = x + w / 2;
+            const cy = y + h / 2;
+            for (let i = 0; i < n; i++) {
+                const g = global.display.get_monitor_geometry(i);
+                if (cx >= g.x && cx < g.x + g.width &&
+                    cy >= g.y && cy < g.y + g.height)
+                    return i;
+            }
+        } catch (e) {
+            // Fall through to the primary monitor.
+        }
+        return primary;
+    }
+
+    setPosition(x, y) {
+        const [cx, cy] = this.clampToVisible(x, y);
+        this.actor.set_position(Math.round(cx), Math.round(cy));
     }
 
     /* ------------------------------------------------------------- menu */
@@ -236,10 +371,11 @@ export class WeatherCard {
     _openMenu() {
         if (this._destroyed || this._menu?.isOpen)
             return;
-        // A menu that was closed by an outside click moments ago should
-        // not instantly reopen from the same click's release event.
+        // A menu closed by an outside click should not immediately reopen
+        // from the same click's release event.
         if (Date.now() - (this._menuClosedAt ?? 0) < 350)
             return;
+
         this._menu = new CardMenu({
             items: this._menuItems(),
             onClose: () => {
@@ -289,9 +425,13 @@ export class WeatherCard {
 
     /** Normal weather display (also used for cached data). */
     showWeather(snapshot, {offline = false, refreshing = false, note = null} = {}) {
+        this._snapshot = snapshot;
         this._render = () =>
-            this._setContent(this._buildWeather(snapshot, {offline, refreshing, note}));
+            this._setContent(this._buildWeather(snapshot, {
+                offline, refreshing, note,
+            }));
         this._render();
+        this._updateAccessibility();
     }
 
     showOnboarding() {
@@ -315,38 +455,51 @@ export class WeatherCard {
     }
 
     /**
-     * Error states — kind is one of:
-     * 'network' | 'provider' | 'malformed' | 'permission' | 'location'
+     * Error states.
+     *
+     * @param {string} kind - 'network' | 'provider' | 'malformed' |
+     *        'permission' | 'location' | 'no-identity'
      */
     showError(kind) {
         this._render = () => this._setContent(this._buildError(kind));
         this._render();
     }
 
-    /* Re-render in the current scheme/scale/unit (called by controller). */
+    /* Re-render in the current unit / scheme / scale (called by controller). */
     updateUnit() {
         this._unit = weather.resolveUnit(this._settings.get_string('unit'));
         this._render?.();
-    }
-
-    setScheme(scheme) {
-        this._scheme = scheme;
-        this._render?.();
+        this._updateAccessibility();
     }
 
     setScale(paintScale) {
-        this._paintScale = Math.max(1, paintScale);
+        const next = Math.max(1, paintScale);
+        if (next === this._paintScale)
+            return;
+        this._paintScale = next;
         this._render?.();
+    }
+
+    /** Adopt a new colour scheme; the material owns the stylesheet swap. */
+    setScheme(scheme) {
+        this._material.setScheme(scheme);
+        this._render?.();
+    }
+
+    /** React to a change in reduced-motion or animation settings. */
+    refreshMotionPolicy() {
+        this._scene?.refreshMotionPolicy();
+        this._applySceneMotion();
     }
 
     setOverviewHidden(hidden) {
         this._overviewHidden = hidden;
-        const animate = icons.animationsEnabled();
         if (hidden) {
-            if (animate) {
+            this._scene?.setActive(false);
+            if (MaterialTheme.motionEnabled()) {
                 this.actor.ease({
                     opacity: 0,
-                    duration: 140,
+                    duration: MOTION.quick,
                     mode: EASE,
                     onComplete: () => {
                         if (this._overviewHidden && !this._destroyed)
@@ -358,122 +511,187 @@ export class WeatherCard {
             }
         } else {
             this.actor.show();
-            if (animate)
-                this.actor.ease({opacity: 255, duration: 140, mode: EASE});
+            if (MaterialTheme.motionEnabled())
+                this.actor.ease({opacity: 255, duration: MOTION.quick, mode: EASE});
+            this._applySceneMotion();
         }
-    }
-
-    setPosition(x, y) {
-        this.actor.set_position(Math.round(x), Math.round(y));
     }
 
     /* ---------------------------------------------------- content build */
 
-    _icon(iconKey, size) {
+    _makeIcon(iconKey, size) {
         return icons.iconActor(iconKey, size, {
             basePath: this._basePath,
-            scheme: this._scheme,
+            scheme: this._material.scheme,
             paintScale: this._paintScale,
         });
     }
 
-    _weatherFootnote(snapshot, {offline, refreshing, note}) {
-        const parts = [];
+    /**
+     * Ensure the hero scene exists for the current condition.
+     *
+     * The scene is created once and reused for identical conditions, so an
+     * ordinary refresh never rebuilds (or re-animates) the artwork.
+     */
+    _ensureScene(iconKey) {
+        if (!this._scene) {
+            this._scene = new WeatherSceneView({
+                makeIcon: (k, s) => this._makeIcon(k, s),
+                size: LAYOUT.heroIcon,
+            });
+        }
+        this._scene.setCondition(iconKey);
+        this._applySceneMotion();
+        return this._scene.actor;
+    }
+
+    _applySceneMotion() {
+        if (!this._scene)
+            return;
+        this._scene.refreshMotionPolicy();
+        this._scene.setActive(!this._overviewHidden && !this._destroyed);
+    }
+
+    /**
+     * Which secondary facts deserve space right now.
+     *
+     * Only information that changes a decision earns a line: a "feels like"
+     * that materially disagrees with the reading, or a precipitation chance
+     * high enough to alter plans.
+     */
+    _secondaryFacts(snapshot) {
+        const facts = [];
+        if (weather.feelsLikeMatters(
+            snapshot.current.tempC, snapshot.current.feelsC, this._unit)) {
+            facts.push(`Feels like ${weather.displayTemp(
+                snapshot.current.feelsC, this._unit)}`);
+        }
+        if (weather.precipChanceMatters(snapshot.today.precipProb))
+            facts.push(`${Math.round(snapshot.today.precipProb)}% chance`);
+        else if (snapshot.current.precipMm >= 0.1)
+            facts.push('Precipitating');
+        return facts;
+    }
+
+    _statusFor(snapshot, {offline, note}) {
         if (note)
-            parts.push(note);
-        if (offline)
-            parts.push(`Offline — updated ${weather.formatWallClock(snapshot.fetchedAt)}`);
-        else if (refreshing)
-            parts.push('Refreshing…');
-        return parts.join(' · ');
+            return {text: note, critical: false};
+        if (offline) {
+            return {
+                text: `Offline — showing ${weather.formatWallClock(snapshot.fetchedAt)}`,
+                critical: true,
+            };
+        }
+        // Refreshing is deliberately silent: a card that says "Refreshing…"
+        // every fifteen minutes is a card nobody reads.
+        return null;
     }
 
     _buildWeather(snapshot, {offline, refreshing, note}) {
-        const box = vbox();
+        const root = vbox();
 
+        /* --- location ------------------------------------------------- */
         const header = hbox();
         const location = label(
-            snapshot.location.name ?? 'Current Location',
-            'wc-location', {ellipsize: true});
+            snapshot.location.name ?? 'Current Location', 'wc-location',
+            {ellipsize: true});
         location.x_expand = true;
-        const updated = label(
-            `Updated ${weather.formatWallClock(snapshot.fetchedAt)}`, 'wc-updated');
+        location.y_align = Clutter.ActorAlign.CENTER;
         header.add_child(location);
-        header.add_child(updated);
-        box.add_child(header);
 
-        const hero = hbox();
-        hero.margin_top = 2;
-        const temp = label(
+        // Open-Meteo's licence requires a link next to displayed data.
+        const attribution = label('Open-Meteo', 'wc-attribution');
+        attribution.y_align = Clutter.ActorAlign.CENTER;
+        header.add_child(attribution);
+        root.add_child(header);
+
+        /* --- hero: temperature and condition art ---------------------- */
+        const hero = hbox(SPACE.md);
+        hero.margin_top = SPACE.md;
+
+        const tempLabel = label(
             weather.displayTemp(snapshot.current.tempC, this._unit), 'wc-temp');
-        const icon = this._icon(snapshot.current.iconKey, HERO_ICON_SIZE);
-        icon.x_expand = true;
-        icon.x_align = Clutter.ActorAlign.END;
-        hero.add_child(temp);
-        hero.add_child(icon);
-        box.add_child(hero);
+        tempLabel.y_align = Clutter.ActorAlign.CENTER;
 
+        const sceneActor = this._ensureScene(snapshot.current.iconKey);
+        sceneActor.y_align = Clutter.ActorAlign.CENTER;
+        sceneActor.x_expand = true;
+
+        hero.add_child(tempLabel);
+        hero.add_child(sceneActor);
+        root.add_child(hero);
+
+        /* --- condition ------------------------------------------------ */
         const condition = label(snapshot.current.label, 'wc-condition');
-        condition.margin_top = 2;
-        box.add_child(condition);
+        condition.margin_top = SPACE.xs;
+        root.add_child(condition);
 
-        const meta = vbox();
-        meta.margin_top = 7;
+        /* --- high / low, plus only what matters ----------------------- */
+        const meta = hbox(SPACE.md);
+        meta.margin_top = SPACE.sm;
         const hl = label(
-            `H ${weather.displayTemp(snapshot.today.maxC, this._unit)}   ` +
-            `L ${weather.displayTemp(snapshot.today.minC, this._unit)}`,
+            `H ${weather.displayTemp(snapshot.today.maxC, this._unit)}` +
+            `   L ${weather.displayTemp(snapshot.today.minC, this._unit)}`,
             'wc-meta');
+        hl.y_align = Clutter.ActorAlign.CENTER;
         meta.add_child(hl);
 
-        let detail = `Feels like ${weather.displayTemp(snapshot.current.feelsC, this._unit)}`;
-        const prob = snapshot.today.precipProb;
-        if (prob !== null && prob >= 20)
-            detail += `  ·  ${Math.round(prob)}% precipitation`;
-        else if (snapshot.current.precipMm >= 0.1)
-            detail += `  ·  precipitating now`;
-        meta.add_child(label(detail, 'wc-meta'));
-        box.add_child(meta);
+        const facts = this._secondaryFacts(snapshot);
+        if (facts.length > 0) {
+            const sep = label('·', 'wc-meta-sep');
+            sep.y_align = Clutter.ActorAlign.CENTER;
+            meta.add_child(sep);
+            const f = label(facts.join('   ·   '), 'wc-meta');
+            f.y_align = Clutter.ActorAlign.CENTER;
+            meta.add_child(f);
+        }
+        root.add_child(meta);
 
-        const sep = separator();
-        sep.margin_top = 18;
-        sep.margin_bottom = 14;
-        box.add_child(sep);
+        /* --- hourly ---------------------------------------------------- */
+        const rule = hairline();
+        rule.margin_top = SPACE.lg;
+        rule.margin_bottom = SPACE.md;
+        root.add_child(rule);
 
-        box.add_child(this._buildHourly(snapshot));
+        root.add_child(this._buildHourly(snapshot));
 
-        const footnote = this._weatherFootnote(snapshot, {offline, refreshing, note});
-        if (footnote !== '') {
-            const row = hbox();
-            row.margin_top = 14;
-            const text = label(footnote, 'wc-footnote');
-            text.y_align = Clutter.ActorAlign.CENTER;
-            row.add_child(text);
-            if (offline) {
-                const retry = button('Try Again', 'wc-btn-text',
-                    () => this._callbacks.refresh?.());
-                retry.set_style('padding: 4px 10px; font-size: 12px;');
-                retry.margin_left = 12;
-                row.add_child(retry);
+        /* --- status: only when it says something ----------------------- */
+        const status = this._statusFor(snapshot, {offline, note});
+        if (status) {
+            const row = statusLine(status.text, {critical: status.critical});
+            if (row) {
+                row.margin_top = SPACE.md;
+                if (offline) {
+                    const retry = button('Try Again', 'wc-btn-quiet',
+                        () => this._callbacks.refresh?.());
+                    retry.y_align = Clutter.ActorAlign.CENTER;
+                    row.add_child(retry);
+                }
+                root.add_child(row);
             }
-            box.add_child(row);
         }
 
-        return box;
+        return root;
     }
 
     _buildHourly(snapshot) {
         const row = hbox();
         row.x_expand = true;
-        for (const hour of snapshot.hourly.slice(0, HOURLY_COUNT)) {
-            const cell = vbox(6);
+        const hours = snapshot.hourly.slice(0, LAYOUT.hourlyCount);
+        for (const hour of hours) {
+            const cell = vbox(SPACE.sm);
             cell.x_expand = true;
+
             const time = label(weather.formatHour(hour.iso), 'wc-hour-time');
             time.x_align = Clutter.ActorAlign.CENTER;
-            const icon = this._icon(hour.iconKey, HOURLY_ICON_SIZE);
+
+            const icon = this._makeIcon(hour.iconKey, LAYOUT.hourlyIcon);
             icon.x_align = Clutter.ActorAlign.CENTER;
+
             const temp = label(
                 weather.displayTemp(hour.tempC, this._unit), 'wc-hour-temp');
             temp.x_align = Clutter.ActorAlign.CENTER;
+
             cell.add_child(time);
             cell.add_child(icon);
             cell.add_child(temp);
@@ -482,163 +700,168 @@ export class WeatherCard {
         return row;
     }
 
-    _buildOnboarding() {
-        const box = vbox();
-
-        const mark = this._icon('partly-day', 52);
+    _stateMark(iconKey) {
+        const holder = vbox();
+        holder.margin_top = SPACE.xs;
+        const mark = this._makeIcon(iconKey, 52);
         mark.x_align = Clutter.ActorAlign.CENTER;
-        mark.margin_top = 4;
-        box.add_child(mark);
+        holder.add_child(mark);
+        return holder;
+    }
+
+    _buildOnboarding() {
+        const root = vbox();
+        root.add_child(this._stateMark('partly-day'));
 
         const title = label('Weather where you are', 'wc-title');
         title.x_align = Clutter.ActorAlign.CENTER;
-        title.margin_top = 18;
-        box.add_child(title);
+        title.margin_top = SPACE.lg;
+        root.add_child(title);
 
         const body = label(
             'Allow Weather to use your approximate location to show local conditions.',
             'wc-body', {wrap: true});
         body.x_align = Clutter.ActorAlign.CENTER;
-        body.margin_top = 10;
-        box.add_child(body);
+        body.margin_top = SPACE.sm;
+        root.add_child(body);
 
-        const actions = hbox(10);
-        actions.x_align = Clutter.ActorAlign.CENTER;
-        actions.margin_top = 24;
-        actions.margin_bottom = 4;
+        const actions = vbox(SPACE.sm);
+        actions.margin_top = SPACE.xl;
         actions.add_child(button('Use Current Location', 'wc-btn-primary',
-            () => this._callbacks.useCurrentLocation?.()));
-        actions.add_child(button('Choose Location', 'wc-btn-text',
-            () => this._callbacks.chooseLocation?.()));
-        box.add_child(actions);
+            () => this._callbacks.useCurrentLocation?.(),
+            {accessibleName: 'Use current location'}));
+        actions.add_child(button('Choose Location', 'wc-btn-secondary',
+            () => this._callbacks.chooseLocation?.(),
+            {accessibleName: 'Choose a location manually'}));
+        root.add_child(actions);
 
-        return box;
+        return root;
     }
 
     _buildLocating() {
-        const box = vbox();
-        const mark = this._icon('partly-night', 48);
-        mark.x_align = Clutter.ActorAlign.CENTER;
-        mark.margin_top = 4;
-        box.add_child(mark);
-        this._pulseAfterRender = mark;
+        const root = vbox();
+        root.add_child(this._stateMark('partly-night'));
 
         const title = label('Finding your location…', 'wc-title');
         title.x_align = Clutter.ActorAlign.CENTER;
-        title.margin_top = 18;
-        box.add_child(title);
+        title.margin_top = SPACE.lg;
+        root.add_child(title);
 
         const body = label(
             'GNOME will ask for your permission. This only takes a moment.',
             'wc-body', {wrap: true});
         body.x_align = Clutter.ActorAlign.CENTER;
-        body.margin_top = 10;
-        box.add_child(body);
-
-        return box;
+        body.margin_top = SPACE.sm;
+        root.add_child(body);
+        return root;
     }
 
     _buildLoading() {
-        const box = vbox();
+        const root = vbox();
 
         const header = hbox();
-        header.add_child(this._skel(120, 14));
-        const upd = this._skel(64, 10);
-        upd.x_align = Clutter.ActorAlign.END;
-        header.add_child(upd);
-        box.add_child(header);
+        header.add_child(this._skel(118, 13));
+        const right = this._skel(58, 10);
+        right.x_align = Clutter.ActorAlign.END;
+        header.add_child(right);
+        root.add_child(header);
 
         const hero = hbox();
-        hero.margin_top = 10;
-        hero.add_child(this._skel(120, 56));
-        const icon = this._skelRound(HERO_ICON_SIZE);
-        icon.x_align = Clutter.ActorAlign.END;
-        hero.add_child(icon);
-        box.add_child(hero);
+        hero.margin_top = SPACE.md;
+        hero.add_child(this._skel(112, Math.round(LAYOUT.heroIcon * 0.8)));
+        const mark = this._skelRound(LAYOUT.heroIcon);
+        mark.x_align = Clutter.ActorAlign.END;
+        hero.add_child(mark);
+        root.add_child(hero);
 
-        const condition = this._skel(160, 14);
-        condition.margin_top = 8;
-        box.add_child(condition);
+        const condition = this._skel(150, 13);
+        condition.margin_top = SPACE.sm;
+        root.add_child(condition);
 
-        const meta1 = this._skel(210, 11);
-        meta1.margin_top = 10;
-        box.add_child(meta1);
-        const meta2 = this._skel(140, 11);
-        meta2.margin_top = 7;
-        box.add_child(meta2);
+        const meta = this._skel(196, 11);
+        meta.margin_top = SPACE.md;
+        root.add_child(meta);
 
-        const sep = separator();
-        sep.margin_top = 18;
-        sep.margin_bottom = 14;
-        box.add_child(sep);
+        const rule = hairline();
+        rule.margin_top = SPACE.lg;
+        rule.margin_bottom = SPACE.md;
+        root.add_child(rule);
 
         const hours = hbox();
         hours.x_expand = true;
-        for (let i = 0; i < HOURLY_COUNT; i++) {
-            const cell = vbox(7);
+        for (let i = 0; i < LAYOUT.hourlyCount; i++) {
+            const cell = vbox(SPACE.sm);
             cell.x_expand = true;
-            cell.add_child(this._skel(30, 9));
-            const icon2 = this._skelRound(HOURLY_ICON_SIZE);
-            icon2.x_align = Clutter.ActorAlign.CENTER;
-            cell.add_child(icon2);
-            cell.add_child(this._skel(28, 10));
+            const t = this._skel(26, 9);
+            t.x_align = Clutter.ActorAlign.CENTER;
+            const icon = this._skelRound(LAYOUT.hourlyIcon);
+            icon.x_align = Clutter.ActorAlign.CENTER;
+            const v = this._skel(24, 10);
+            v.x_align = Clutter.ActorAlign.CENTER;
+            cell.add_child(t);
+            cell.add_child(icon);
+            cell.add_child(v);
             hours.add_child(cell);
         }
-        box.add_child(hours);
-
-        const footnote = label('Updating…', 'wc-footnote');
-        footnote.margin_top = 14;
-        box.add_child(footnote);
-        this._pulseAfterRender = box;
-
-        return box;
+        root.add_child(hours);
+        return root;
     }
 
     _skel(w, h) {
-        const s = new St.Widget({style_class: 'wc-skel', width: w, height: h});
-        return s;
+        return new St.Widget({style_class: 'wc-skel', width: w, height: h});
     }
 
     _skelRound(size) {
-        return new St.Widget({style_class: 'wc-skel-round', width: size, height: size});
+        return new St.Widget({
+            style_class: 'wc-skel wc-skel-round',
+            width: size,
+            height: size,
+        });
     }
 
     _buildChoosePending() {
-        const box = vbox();
+        const root = vbox();
+        root.add_child(this._stateMark('fog'));
+
         const title = label('Choose a location', 'wc-title');
         title.x_align = Clutter.ActorAlign.CENTER;
-        title.margin_top = 6;
-        box.add_child(title);
+        title.margin_top = SPACE.lg;
+        root.add_child(title);
+
         const body = label(
             'Pick a place in the window that just opened.',
             'wc-body', {wrap: true});
         body.x_align = Clutter.ActorAlign.CENTER;
-        body.margin_top = 10;
-        box.add_child(body);
-        return box;
+        body.margin_top = SPACE.sm;
+        root.add_child(body);
+        return root;
     }
 
     _buildError(kind) {
         const specs = {
             'network': {
+                mark: 'fog',
                 title: 'No connection',
                 body: 'You appear to be offline. Weather will update automatically once you’re connected again.',
                 primary: 'Try Again',
                 onPrimary: () => this._callbacks.refresh?.(),
             },
             'provider': {
+                mark: 'cloudy',
                 title: 'Weather service hiccup',
                 body: 'The weather service couldn’t answer just now. This is usually brief.',
                 primary: 'Try Again',
                 onPrimary: () => this._callbacks.refresh?.(),
             },
             'malformed': {
+                mark: 'cloudy',
                 title: 'Couldn’t read the update',
                 body: 'The weather service sent something unexpected. Trying again usually fixes it.',
                 primary: 'Try Again',
                 onPrimary: () => this._callbacks.refresh?.(),
             },
             'permission': {
+                mark: 'fog',
                 title: 'Location access declined',
                 body: 'You can allow access from Settings → Privacy → Location, or simply choose a place to use instead.',
                 primary: 'Choose Location…',
@@ -647,6 +870,7 @@ export class WeatherCard {
                 onSecondary: () => this._callbacks.useCurrentLocation?.(),
             },
             'location': {
+                mark: 'fog',
                 title: 'Couldn’t determine location',
                 body: 'Location services may be switched off or unavailable. You can pick a place manually instead.',
                 primary: 'Choose Location…',
@@ -654,72 +878,74 @@ export class WeatherCard {
                 secondary: 'Try Again',
                 onSecondary: () => this._callbacks.useCurrentLocation?.(),
             },
+            'no-identity': {
+                mark: 'fog',
+                title: 'Location identity missing',
+                body: 'GNOME needs an installed application identity before it can share your location. Run the installer, or choose a place to use instead.',
+                primary: 'Choose Location…',
+                onPrimary: () => this._callbacks.chooseLocation?.(),
+            },
         };
         const spec = specs[kind] ?? specs.provider;
 
-        const box = vbox();
+        const root = vbox();
+        root.add_child(this._stateMark(spec.mark));
+
         const title = label(spec.title, 'wc-title');
-        title.margin_top = 4;
-        box.add_child(title);
+        title.x_align = Clutter.ActorAlign.CENTER;
+        title.margin_top = SPACE.lg;
+        root.add_child(title);
+
         const body = label(spec.body, 'wc-body', {wrap: true});
-        body.margin_top = 10;
-        box.add_child(body);
+        body.x_align = Clutter.ActorAlign.CENTER;
+        body.margin_top = SPACE.sm;
+        root.add_child(body);
 
-        const actions = hbox(10);
-        actions.margin_top = 22;
-        actions.margin_bottom = 4;
+        const actions = vbox(SPACE.sm);
+        actions.margin_top = SPACE.xl;
         actions.add_child(button(spec.primary, 'wc-btn-primary', spec.onPrimary));
-        if (spec.secondary)
-            actions.add_child(button(spec.secondary, 'wc-btn-text', spec.onSecondary));
-        box.add_child(actions);
+        if (spec.secondary) {
+            actions.add_child(button(spec.secondary, 'wc-btn-secondary',
+                spec.onSecondary));
+        }
+        root.add_child(actions);
 
-        return box;
+        return root;
     }
 
     /* ------------------------------------------------------ transitions */
 
     _setContent(content) {
-        this._stopPulse();
         const old = this._content;
         this._content = content;
-        this.actor.set_child(content);
+        this._contentBin.set_child(content);
         if (old)
             old.destroy();
 
-        if (content && icons.animationsEnabled()) {
+        if (content && MaterialTheme.motionEnabled()) {
             content.set_opacity(0);
-            content.ease({opacity: 255, duration: 180, mode: EASE});
-        }
-
-        // A pulse requested during build starts after the fade-in so the
-        // two never fight over the opacity property.
-        const pulseTarget = this._pulseAfterRender;
-        this._pulseAfterRender = null;
-        if (pulseTarget)
-            this._startPulse(pulseTarget, 250);
-    }
-
-    _startPulse(target, initialDelayMs = 0) {
-        this._stopPulse();
-        if (!icons.animationsEnabled())
-            return;
-        this._pulse = target;
-        const step = (low, delayMs) => {
-            if (this._pulse !== target || this._destroyed)
-                return;
-            target.ease({
-                opacity: low ? 140 : 255,
-                duration: 900,
-                delay: delayMs,
-                mode: EASE_INOUT,
-                onComplete: () => step(!low, 0),
+            content.ease({
+                opacity: 255,
+                duration: MOTION.standard,
+                mode: EASE,
             });
-        };
-        step(true, initialDelayMs);
+        }
     }
 
-    _stopPulse() {
-        this._pulse = null;
+    /**
+     * The card is one interactive object, so assistive technology should hear
+     * a single summary rather than every decorative child. The artwork
+     * carries no accessible role at all.
+     */
+    _updateAccessibility() {
+        if (!this._snapshot)
+            return;
+        try {
+            this.actor.accessible_role = Atk.Role.PANEL;
+            this.actor.accessible_name = weather.describe(this._snapshot, this._unit);
+        } catch (e) {
+            // Accessibility is best-effort; never let it break rendering.
+        }
     }
 
     /* ---------------------------------------------------------- teardown */
@@ -728,49 +954,66 @@ export class WeatherCard {
         if (this._destroyed)
             return;
         this._destroyed = true;
-        this._stopPulse();
+
         this._press = null;
         this._menu?.close();
+        this._menu = null;
+        this._scene?.destroy();
+        this._scene = null;
 
-        for (const id of [this._pressId, this._releaseId, this._motionId, this._keyId]) {
+        for (const id of this._ids ?? []) {
             try {
                 this.actor.disconnect(id);
             } catch (e) {
-                // Actor may already be gone.
+                // Actor already gone.
             }
         }
+        this._ids = [];
 
         this.actor.destroy();
         this._content = null;
+        this._snapshot = null;
     }
 }
 
 /* ------------------------------------------------------------- menu ---- */
 
-/* A deliberately tiny custom menu: four rows, keyboard navigation,
- * focus-visible styling, closes on outside click. */
+/**
+ * A deliberately small menu.
+ *
+ * GNOME's PopupMenu is built around window-anchored popups with struts and
+ * grabs, which is the wrong shape for desktop furniture, so the menu is
+ * hand-rolled — but it keeps the parts that matter for accessibility: real
+ * focusable rows, arrow-key navigation, Escape to dismiss, and an accessible
+ * role.
+ */
 class CardMenu {
     constructor({items, onClose}) {
         this._onClose = onClose;
         this.isOpen = false;
 
-        this.actor = new St.BoxLayout({
-            orientation: V,
+        this.actor = vbox(2, {
             style_class: 'wc-menu',
             reactive: true,
             visible: false,
         });
+        try {
+            this.actor.accessible_role = Atk.Role.MENU;
+        } catch (e) {
+            // Best-effort.
+        }
 
         this._rows = [];
         this._stagePressId = 0;
-        this._keyId = 0;
 
         for (const item of items) {
             const row = new St.Button({
                 style_class: 'wc-menu-item',
                 can_focus: true,
             });
-            const content = hbox(8);
+            row.accessible_name = item.label;
+
+            const content = hbox(SPACE.md);
             if (item.iconName) {
                 content.add_child(new St.Icon({
                     icon_name: item.iconName,
@@ -793,7 +1036,7 @@ class CardMenu {
             this.actor.add_child(row);
         }
 
-        this._keyId = this.actor.connect('key-press-event', (a, event) => {
+        this.actor.connect('key-press-event', (a, event) => {
             if (event.get_key_symbol() === Clutter.KEY_Escape) {
                 this.close();
                 return Clutter.EVENT_STOP;
@@ -810,18 +1053,20 @@ class CardMenu {
         Main.layoutManager.addChrome(this.actor, {affectsStruts: false});
         this.actor.show();
 
-        // Measure now that the actor is staged, then anchor it to the
-        // card's top-right corner, clamped inside the monitor.
-        const [minW, natW] = this.actor.get_preferred_width(-1);
-        const [minH, natH] = this.actor.get_preferred_height(-1);
+        // Measure now that the actor is staged, then anchor it to the card's
+        // top-right corner, clamped inside the monitor holding the card.
+        const [, natW] = this.actor.get_preferred_width(-1);
+        const [, natH] = this.actor.get_preferred_height(-1);
         const [ax, ay] = anchor.get_position();
-        let x = ax + anchor.width - natW - 8;
-        let y = ay + 8;
+        let x = ax + anchor.width - natW - SPACE.md;
+        let y = ay + SPACE.md;
+
         try {
-            const idx = global.display.get_primary_monitor();
-            const mon = global.display.get_monitor_geometry(idx);
-            x = Math.min(Math.max(mon.x + 8, x), mon.x + mon.width - natW - 8);
-            y = Math.min(Math.max(mon.y + 8, y), mon.y + mon.height - natH - 8);
+            const mon = global.display.get_monitor_geometry(
+                this._monitorIndexFor(anchor));
+            const m = SPACE.md;
+            x = Math.min(Math.max(mon.x + m, x), mon.x + mon.width - natW - m);
+            y = Math.min(Math.max(mon.y + m, y), mon.y + mon.height - natH - m);
         } catch (e) {
             // Best effort.
         }
@@ -829,35 +1074,59 @@ class CardMenu {
 
         this._stagePressId = global.stage.connect('button-press-event',
             (stage, event) => {
-                let node = event.get_source();
-                let inside = false;
-                while (node) {
-                    if (node === this.actor) {
-                        inside = true;
-                        break;
-                    }
-                    node = node.get_parent();
-                }
-                if (!inside)
+                if (!this._contains(event.get_source()))
                     this.close();
                 return Clutter.EVENT_PROPAGATE;
             });
 
         this._rows[0]?.grab_key_focus();
 
-        const animate = icons.animationsEnabled();
-        if (animate) {
+        if (MaterialTheme.motionEnabled()) {
             this.actor.set_opacity(0);
-            this.actor.ease({opacity: 255, duration: 130, mode: EASE});
+            this.actor.ease({
+                opacity: 255,
+                duration: MOTION.quick,
+                mode: EASE,
+            });
         }
+    }
+
+    _monitorIndexFor(anchor) {
+        try {
+            const [ax, ay] = anchor.get_position();
+            const cx = ax + anchor.width / 2;
+            const cy = ay + anchor.height / 2;
+            const n = global.display.get_n_monitors();
+            for (let i = 0; i < n; i++) {
+                const g = global.display.get_monitor_geometry(i);
+                if (cx >= g.x && cx < g.x + g.width &&
+                    cy >= g.y && cy < g.y + g.height)
+                    return i;
+            }
+            return global.display.get_primary_monitor();
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    _contains(node) {
+        while (node) {
+            if (node === this.actor)
+                return true;
+            node = node.get_parent();
+        }
+        return false;
     }
 
     _onRowKey(row, event) {
         const key = event.get_key_symbol();
-        if (key !== Clutter.KEY_Up && key !== Clutter.KEY_Down)
+        if (key !== Clutter.KEY_Up && key !== Clutter.KEY_Down &&
+            key !== Clutter.KEY_Left && key !== Clutter.KEY_Right)
             return Clutter.EVENT_PROPAGATE;
+
         const idx = this._rows.indexOf(row);
-        const next = key === Clutter.KEY_Down
+        const forward = key === Clutter.KEY_Down || key === Clutter.KEY_Right;
+        const next = forward
             ? (idx + 1) % this._rows.length
             : (idx - 1 + this._rows.length) % this._rows.length;
         this._rows[next].grab_key_focus();
@@ -877,7 +1146,7 @@ class CardMenu {
         try {
             Main.layoutManager.removeChrome(this.actor);
         } catch (e) {
-            // Not added / already removed.
+            // Not added, or already removed.
         }
         this.actor.destroy();
         this._rows = [];

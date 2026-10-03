@@ -21,6 +21,17 @@ export const ICON_KEYS = [
 ];
 
 /**
+ * Where the artwork lives, set once by the extension at enable() so that
+ * helpers can be called without threading the path through every call site.
+ */
+let RUNTIME_BASE_PATH = '';
+
+/** @param {string} path - the extension directory */
+export function setBasePath(path) {
+    RUNTIME_BASE_PATH = path ?? '';
+}
+
+/**
  * Current card color scheme ('dark' | 'light').
  *
  * @returns {'dark'|'light'}
@@ -72,11 +83,16 @@ export function animationsEnabled() {
  * @param {object} options - {basePath, scheme, paintScale}
  * @returns {St.Bin} fixed-size container holding the texture
  */
-export function iconActor(iconKey, size, {basePath, scheme, paintScale = 1}) {
-    const path = `${basePath}/icons/${scheme}/${iconKey}.svg`;
-    const file = Gio.File.new_for_path(path);
+export function iconActor(iconKey, size, {basePath, scheme, paintScale = 1} = {}) {
+    const key = ICON_KEYS.includes(iconKey) ? iconKey : 'cloudy';
+    const where = scheme === 'light' ? 'light' : 'dark';
+    const root = basePath ?? RUNTIME_BASE_PATH;
+    const path = `${root}/icons/${where}/${key}.svg`;
+
+    // load_file_async rasterises at the requested paint scale, so the
+    // artwork stays crisp on HiDPI without shipping pre-rasterised copies.
     const texture = St.TextureCache.get_default().load_file_async(
-        file, size, size, Math.max(1, paintScale), 1);
+        Gio.File.new_for_path(path), size, size, Math.max(1, paintScale), 1);
     texture.set_size(size, size);
 
     const bin = new St.Bin({width: size, height: size});

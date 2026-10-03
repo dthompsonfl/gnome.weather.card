@@ -1,0 +1,8 @@
+{
+    "uuid": "weather-card@z.ai",
+    "name": "Weather Card",
+    "description": "A quiet, elegant weather card for your desktop. Local conditions, hourly outlook, and careful state design \u2014 powered by Open-Meteo.",
+    "shell-version": ["50", "51"],
+    "version": 1,
+    "settings-schema": "org.gnome.shell.extensions.weather-card"
+}

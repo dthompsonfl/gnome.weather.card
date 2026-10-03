@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.weather-card"
+          path="/org/gnome/shell/extensions/weather-card/">
+
+    <key name="unit" type="s">
+      <choices>
+        <choice value="auto"/>
+        <choice value="celsius"/>
+        <choice value="fahrenheit"/>
+      </choices>
+      <default>'auto'</default>
+      <summary>Temperature unit</summary>
+      <description>
+        Unit used for displayed temperatures. “auto” follows the locale
+        (Fahrenheit where customary), otherwise Celsius.
+      </description>
+    </key>
+
+    <key name="refresh-interval" type="u">
+      <range min="10" max="120"/>
+      <default>15</default>
+      <summary>Refresh interval in minutes</summary>
+      <description>
+        How often fresh weather is requested when conditions allow.
+        Minimum 10 minutes to stay polite to the provider.
+      </description>
+    </key>
+
+    <key name="location-mode" type="s">
+      <choices>
+        <choice value="auto"/>
+        <choice value="manual"/>
+      </choices>
+      <default>'auto'</default>
+      <summary>Location mode</summary>
+      <description>
+        “auto” uses GNOME location services (GeoClue) with the system
+        permission dialog; “manual” uses the city chosen in preferences.
+      </description>
+    </key>
+
+    <key name="manual-name" type="s">
+      <default>''</default>
+      <summary>Name of the manually chosen location</summary>
+      <description>Display name of the city picked via search, e.g. “Berlin”.</description>
+    </key>
+
+    <key name="manual-latitude" type="d">
+      <range min="-90" max="90"/>
+      <default>0</default>
+      <summary>Latitude of the manually chosen location</summary>
+      <description>Stored rounded to two decimals (about 1 km).</description>
+    </key>
+
+    <key name="manual-longitude" type="d">
+      <range min="-180" max="180"/>
+      <default>0</default>
+      <summary>Longitude of the manually chosen location</summary>
+      <description>Stored rounded to two decimals (about 1 km).</description>
+    </key>
+
+    <key name="auto-latitude" type="d">
+      <range min="-90" max="90"/>
+      <default>0</default>
+      <summary>Last known latitude from location services</summary>
+      <description>
+        Rounded to two decimals. Kept only so the widget does not need to
+        ask location services again on every login. Never leaves this
+        machine except in weather requests to Open-Meteo.
+      </description>
+    </key>
+
+    <key name="auto-longitude" type="d">
+      <range min="-180" max="180"/>
+      <default>0</default>
+      <summary>Last known longitude from location services</summary>
+      <description>
+        Rounded to two decimals. Kept only so the widget does not need to
+        ask location services again on every login. Never leaves this
+        machine except in weather requests to Open-Meteo.
+      </description>
+    </key>
+
+    <key name="card-x" type="i">
+      <default>-1</default>
+      <summary>Saved card position, X</summary>
+      <description>
+        Stage coordinates in points. -1 means “use the default position”.
+      </description>
+    </key>
+
+    <key name="card-y" type="i">
+      <default>-1</default>
+      <summary>Saved card position, Y</summary>
+      <description>
+        Stage coordinates in points. -1 means “use the default position”.
+      </description>
+    </key>
+
+  </schema>
+</schemalist>

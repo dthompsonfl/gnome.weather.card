@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <mask id="cut">
+      <rect x="0" y="0" width="96" height="96" fill="#ffffff"/>
+      <circle cx="51.00" cy="39.00" r="13.12" fill="#000000"/>
+    </mask>
+    <circle cx="42.00" cy="46.00" r="16.00" fill="#3B4352" mask="url(#cut)"/>
+    <polygon points="71.00,21.50 72.76,25.24 76.50,27.00 72.76,28.76 71.00,32.50 69.24,28.76 65.50,27.00 69.24,25.24" fill="#B4BBC9" stroke="#B4BBC9" stroke-width="0.00"/>
+    <polygon points="79.00,41.50 80.12,43.88 82.50,45.00 80.12,46.12 79.00,48.50 77.88,46.12 75.50,45.00 77.88,43.88" fill="#B4BBC9" stroke="#B4BBC9" stroke-width="0.00"/>
+    <polygon points="63.00,14.00 63.96,16.04 66.00,17.00 63.96,17.96 63.00,20.00 62.04,17.96 60.00,17.00 62.04,16.04" fill="#B4BBC9" stroke="#B4BBC9" stroke-width="0.00"/>
+  </g>
+</svg>

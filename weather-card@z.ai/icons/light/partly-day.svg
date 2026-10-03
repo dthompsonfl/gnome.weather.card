@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="33.00" cy="32.00" r="10.00" fill="#D8952A"/>
+    <line x1="48.50" y1="32.00" x2="53.50" y2="32.00" stroke="#D8952A" stroke-width="4.50"/>
+    <line x1="43.96" y1="42.96" x2="47.50" y2="46.50" stroke="#D8952A" stroke-width="4.50"/>
+    <line x1="33.00" y1="47.50" x2="33.00" y2="52.50" stroke="#D8952A" stroke-width="4.50"/>
+    <line x1="22.04" y1="42.96" x2="18.50" y2="46.50" stroke="#D8952A" stroke-width="4.50"/>
+    <line x1="17.50" y1="32.00" x2="12.50" y2="32.00" stroke="#D8952A" stroke-width="4.50"/>
+    <line x1="22.04" y1="21.04" x2="18.50" y2="17.50" stroke="#D8952A" stroke-width="4.50"/>
+    <line x1="33.00" y1="16.50" x2="33.00" y2="11.50" stroke="#D8952A" stroke-width="4.50"/>
+    <line x1="43.96" y1="21.04" x2="47.50" y2="17.50" stroke="#D8952A" stroke-width="4.50"/>
+    <circle cx="43.82" cy="51.58" r="9.46" fill="#3B4352"/>
+    <circle cx="57.58" cy="47.28" r="12.90" fill="#3B4352"/>
+    <circle cx="67.04" cy="53.30" r="7.74" fill="#3B4352"/>
+    <rect x="36.94" y="50.72" width="36.12" height="10.32" rx="5.16" fill="#3B4352"/>
+  </g>
+</svg>

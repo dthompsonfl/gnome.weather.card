@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Weather Card
+Comment=Desktop weather card for GNOME Shell (location permission identity)
+Exec=/bin/true
+NoDisplay=true
+X-Purposes=GeoclueLocation
